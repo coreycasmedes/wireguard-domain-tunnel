@@ -1,5 +1,3 @@
 {
-    "editor.formatOnSave": true,
-    "editor.fontSize": 13
-
+    "typescript.tsdk": "node_modules/typescript/lib"
 }
