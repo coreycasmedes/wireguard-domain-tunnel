@@ -1,9 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { StatusBar } from './renderer/components/StatusBar';
-import { DomainList } from './renderer/components/DomainList';
-import { WireGuardConfig } from './renderer/components/WireGuardConfig';
-import { DnsConfig } from './renderer/components/DnsConfig';
-import { ActivityLog } from './renderer/components/ActivityLog';
+import { DomainPanel } from './renderer/components/panels/DomainPanel';
+import { ActivityPanel } from './renderer/components/panels/ActivityPanel';
+import { SettingsPanel } from './renderer/components/panels/SettingsPanel';
 import { ConflictWarnings } from './renderer/components/ConflictWarnings';
 import {
   DomainRule,
@@ -14,11 +12,8 @@ import {
   AppStatus,
 } from './renderer/types';
 
-type Tab = 'domains' | 'settings' | 'log';
-
 const App = () => {
   // State
-  const [activeTab, setActiveTab] = useState<Tab>('domains');
   const [domains, setDomains] = useState<DomainRule[]>([]);
   const [wgSettings, setWgSettings] = useState<WireGuardSettings>({
     interfaceName: '',
@@ -169,106 +164,53 @@ const App = () => {
   }, []);
 
   return (
-    <div className="h-screen flex flex-col bg-gray-950 text-white">
+    <div className="h-screen flex flex-col bg-background">
       {/* Draggable title bar area */}
-      <div className="h-8 bg-gray-900 flex items-center justify-center" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
-        <span className="text-xs text-gray-500">WireGuard Domain Tunnel</span>
+      <div
+        className="h-8 bg-muted flex items-center justify-center border-b"
+        style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+      >
+        <span className="text-xs text-muted-foreground">WireGuard Domain Tunnel</span>
       </div>
 
-      {/* Status bar */}
-      <StatusBar
-        status={status}
-        onStart={handleStart}
-        onStop={handleStop}
-        isLoading={isLoading}
-      />
-
-      {/* Conflict warnings */}
+      {/* Conflict warnings - spans full width */}
       {conflicts.length > 0 && <ConflictWarnings conflicts={conflicts} />}
 
-      {/* Tab navigation */}
-      <div className="flex border-b border-gray-800">
-        <TabButton
-          active={activeTab === 'domains'}
-          onClick={() => setActiveTab('domains')}
-        >
-          Domains
-          {domains.length > 0 && (
-            <span className="ml-2 px-1.5 py-0.5 text-xs bg-gray-700 rounded">
-              {domains.length}
-            </span>
-          )}
-        </TabButton>
-        <TabButton
-          active={activeTab === 'settings'}
-          onClick={() => setActiveTab('settings')}
-        >
-          Settings
-        </TabButton>
-        <TabButton
-          active={activeTab === 'log'}
-          onClick={() => setActiveTab('log')}
-        >
-          Activity
-          {logEntries.length > 0 && (
-            <span className="ml-2 px-1.5 py-0.5 text-xs bg-gray-700 rounded">
-              {logEntries.length}
-            </span>
-          )}
-        </TabButton>
-      </div>
-
-      {/* Tab content */}
-      <div className="flex-1 overflow-hidden">
-        {activeTab === 'domains' && (
-          <DomainList
+      {/* 3-Panel Layout */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Left Panel - Domain Management */}
+        <div className="w-80 border-r flex-shrink-0">
+          <DomainPanel
             domains={domains}
             onAdd={handleAddDomain}
             onRemove={handleRemoveDomain}
           />
-        )}
+        </div>
 
-        {activeTab === 'settings' && (
-          <div className="h-full overflow-auto">
-            <WireGuardConfig
-              settings={wgSettings}
-              onSettingsChange={handleWgSettingsChange}
-            />
-            <div className="border-t border-gray-800" />
-            <DnsConfig
-              settings={dnsSettings}
-              onSettingsChange={handleDnsSettingsChange}
-            />
-          </div>
-        )}
+        {/* Center Panel - Activity Log */}
+        <div className="flex-1 min-w-0">
+          <ActivityPanel
+            entries={logEntries}
+            onClear={handleClearLog}
+          />
+        </div>
 
-        {activeTab === 'log' && (
-          <ActivityLog entries={logEntries} onClear={handleClearLog} />
-        )}
+        {/* Right Panel - Settings & Status */}
+        <div className="w-96 border-l flex-shrink-0">
+          <SettingsPanel
+            status={status}
+            wgSettings={wgSettings}
+            dnsSettings={dnsSettings}
+            onStart={handleStart}
+            onStop={handleStop}
+            onWgSettingsChange={handleWgSettingsChange}
+            onDnsSettingsChange={handleDnsSettingsChange}
+            isLoading={isLoading}
+          />
+        </div>
       </div>
     </div>
   );
 };
-
-interface TabButtonProps {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}
-
-function TabButton({ active, onClick, children }: TabButtonProps) {
-  return (
-    <button
-      onClick={onClick}
-      className={`px-4 py-3 text-sm font-medium transition-colors ${
-        active
-          ? 'text-white border-b-2 border-blue-500 -mb-px'
-          : 'text-gray-400 hover:text-gray-300'
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
 
 export default App;

@@ -398,6 +398,12 @@ async function cleanup(): Promise<void> {
   } catch {
     // Ignore errors during cleanup
   }
+
+  // Destroy tray icon
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
 }
 
 // Register IPC handlers
