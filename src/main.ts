@@ -471,6 +471,10 @@ function registerIpcHandlers(): void {
     return wireguard.getAllowedIps();
   });
 
+  ipcMain.handle('wireguard:detect-tunnels', async () => {
+    return wireguard.detectTunnels();
+  });
+
   // DNS settings
   ipcMain.handle('dns:get-settings', () => {
     return configStore.getDnsSettings();

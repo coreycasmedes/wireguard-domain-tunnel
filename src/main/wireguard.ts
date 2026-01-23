@@ -3,6 +3,7 @@
  *
  * Wraps the WireGuard CLI (`wg` and `wg-quick`) to:
  * - Detect active interfaces and peers
+ * - Detect third-party VPN clients (Mullvad, PIA, etc.)
  * - Inject IPs into allowed-ips
  * - Remove IPs from allowed-ips
  */
@@ -32,6 +33,44 @@ export interface WireGuardPeer {
 export interface WireGuardConfig {
   interfaceName: string;
   peerPublicKey: string;
+}
+
+/**
+ * Detected third-party VPN information
+ */
+export interface DetectedVPN {
+  provider: 'mullvad' | 'pia' | 'protonvpn' | 'unknown';
+  connected: boolean;
+  protocol: 'wireguard' | 'openvpn' | 'unknown';
+  server?: string;
+  location?: string;
+  publicKey?: string;
+  interfaceName?: string;
+  /**
+   * Whether this VPN's WireGuard implementation can be controlled via `wg` CLI.
+   * Third-party VPNs typically use embedded implementations that can't be modified.
+   */
+  controllable: boolean;
+  /**
+   * Human-readable message about the VPN status
+   */
+  message: string;
+}
+
+/**
+ * Comprehensive tunnel detection result
+ */
+export interface TunnelDetectionResult {
+  /** Native WireGuard interfaces detected via `wg show` */
+  nativeInterfaces: WireGuardInterface[];
+  /** Third-party VPNs detected */
+  thirdPartyVPNs: DetectedVPN[];
+  /** utun interfaces that might be VPN tunnels */
+  utunInterfaces: string[];
+  /** Overall status message */
+  status: 'native_available' | 'third_party_detected' | 'no_tunnel' | 'unknown';
+  /** Human-readable summary */
+  summary: string;
 }
 
 export class WireGuard extends EventEmitter {
@@ -341,6 +380,195 @@ export class WireGuard extends EventEmitter {
    */
   getConfig(): WireGuardConfig | null {
     return this.config ? { ...this.config } : null;
+  }
+
+  /**
+   * Detect Mullvad VPN via its CLI
+   */
+  async detectMullvad(): Promise<DetectedVPN | null> {
+    try {
+      // Check if mullvad CLI is available
+      await execAsync('which mullvad');
+    } catch {
+      return null;
+    }
+
+    try {
+      const { stdout: statusOutput } = await execAsync('mullvad status');
+      const isConnected = statusOutput.toLowerCase().includes('connected');
+
+      if (!isConnected) {
+        return {
+          provider: 'mullvad',
+          connected: false,
+          protocol: 'unknown',
+          controllable: false,
+          message: 'Mullvad VPN is installed but not connected',
+        };
+      }
+
+      // Parse the status output for server and location
+      // Format: "Connected to us-chi-wg-306 in Chicago, IL, USA"
+      const serverMatch = statusOutput.match(/Connected to (\S+)/);
+      const locationMatch = statusOutput.match(/in (.+?)(?:\n|$)/);
+
+      // Get tunnel details including public key
+      let publicKey: string | undefined;
+      let protocol: 'wireguard' | 'openvpn' | 'unknown' = 'unknown';
+
+      try {
+        const { stdout: tunnelOutput } = await execAsync('mullvad tunnel get');
+        const keyMatch = tunnelOutput.match(/Public key:\s+(\S+)/);
+        if (keyMatch) {
+          publicKey = keyMatch[1];
+        }
+        if (tunnelOutput.toLowerCase().includes('wireguard')) {
+          protocol = 'wireguard';
+        } else if (tunnelOutput.toLowerCase().includes('openvpn')) {
+          protocol = 'openvpn';
+        }
+      } catch {
+        // Tunnel details not available
+      }
+
+      // Try to determine which utun interface Mullvad is using
+      let interfaceName: string | undefined;
+      try {
+        const { stdout: routeOutput } = await execAsync('netstat -rn | grep "^default.*utun"');
+        const utunMatch = routeOutput.match(/utun\d+/);
+        if (utunMatch) {
+          interfaceName = utunMatch[0];
+        }
+      } catch {
+        // Route detection failed
+      }
+
+      return {
+        provider: 'mullvad',
+        connected: true,
+        protocol,
+        server: serverMatch ? serverMatch[1] : undefined,
+        location: locationMatch ? locationMatch[1].trim() : undefined,
+        publicKey,
+        interfaceName,
+        controllable: false,
+        message: `Mullvad VPN connected to ${serverMatch ? serverMatch[1] : 'unknown server'}. Uses embedded WireGuard - cannot modify allowed-ips directly.`,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Detect PIA (Private Internet Access) VPN
+   */
+  async detectPIA(): Promise<DetectedVPN | null> {
+    try {
+      // Check if piactl is available
+      await execAsync('which piactl');
+    } catch {
+      return null;
+    }
+
+    try {
+      const { stdout } = await execAsync('piactl get connectionstate');
+      const isConnected = stdout.trim().toLowerCase() === 'connected';
+
+      if (!isConnected) {
+        return {
+          provider: 'pia',
+          connected: false,
+          protocol: 'unknown',
+          controllable: false,
+          message: 'PIA VPN is installed but not connected',
+        };
+      }
+
+      // Get protocol
+      let protocol: 'wireguard' | 'openvpn' | 'unknown' = 'unknown';
+      try {
+        const { stdout: protoOut } = await execAsync('piactl get protocol');
+        if (protoOut.toLowerCase().includes('wireguard')) {
+          protocol = 'wireguard';
+        } else if (protoOut.toLowerCase().includes('openvpn')) {
+          protocol = 'openvpn';
+        }
+      } catch {
+        // Protocol detection failed
+      }
+
+      return {
+        provider: 'pia',
+        connected: true,
+        protocol,
+        controllable: false,
+        message: 'PIA VPN connected. Uses embedded WireGuard - cannot modify allowed-ips directly.',
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * List all utun interfaces on macOS
+   */
+  async listUtunInterfaces(): Promise<string[]> {
+    try {
+      const { stdout } = await execAsync('ifconfig | grep "^utun" | cut -d: -f1');
+      return stdout
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Comprehensive tunnel detection
+   * Checks for native WireGuard interfaces, third-party VPNs, and utun interfaces
+   */
+  async detectTunnels(): Promise<TunnelDetectionResult> {
+    const [nativeInterfaces, mullvad, pia, utunInterfaces] = await Promise.all([
+      this.getInterfaces(),
+      this.detectMullvad(),
+      this.detectPIA(),
+      this.listUtunInterfaces(),
+    ]);
+
+    const thirdPartyVPNs: DetectedVPN[] = [];
+    if (mullvad) thirdPartyVPNs.push(mullvad);
+    if (pia) thirdPartyVPNs.push(pia);
+
+    // Determine overall status
+    let status: TunnelDetectionResult['status'];
+    let summary: string;
+
+    if (nativeInterfaces.length > 0) {
+      status = 'native_available';
+      summary = `Found ${nativeInterfaces.length} native WireGuard interface(s): ${nativeInterfaces.map((i) => i.name).join(', ')}`;
+    } else if (thirdPartyVPNs.some((vpn) => vpn.connected)) {
+      status = 'third_party_detected';
+      const connectedVPNs = thirdPartyVPNs.filter((vpn) => vpn.connected);
+      summary = `Third-party VPN detected: ${connectedVPNs.map((v) => v.provider).join(', ')}. These use embedded WireGuard implementations that cannot be controlled via the wg CLI. Consider using manual WireGuard configuration.`;
+    } else if (thirdPartyVPNs.length > 0) {
+      status = 'no_tunnel';
+      summary = `VPN client(s) installed (${thirdPartyVPNs.map((v) => v.provider).join(', ')}) but not connected. Connect your VPN or configure a WireGuard tunnel manually.`;
+    } else if (utunInterfaces.length > 0) {
+      status = 'unknown';
+      summary = `Found ${utunInterfaces.length} utun interface(s) but could not identify the VPN. You may need to configure manually.`;
+    } else {
+      status = 'no_tunnel';
+      summary = 'No WireGuard tunnels detected. Start a VPN connection or configure manually.';
+    }
+
+    return {
+      nativeInterfaces,
+      thirdPartyVPNs,
+      utunInterfaces,
+      status,
+      summary,
+    };
   }
 }
 

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { AppStatus, WireGuardSettings, DnsSettings, WireGuardInterface } from '../../types';
+import { AppStatus, WireGuardSettings, DnsSettings, WireGuardInterface, TunnelDetectionResult, DetectedVPN } from '../../types';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../../components/ui/card';
 import { Button } from '../../../components/ui/button';
 import { Badge } from '../../../components/ui/badge';
@@ -18,7 +18,11 @@ import {
   Wifi,
   Server,
   ChevronDown,
-  ChevronRight
+  ChevronRight,
+  RefreshCw,
+  Info,
+  CheckCircle2,
+  XCircle
 } from 'lucide-react';
 
 interface SettingsPanelProps {
@@ -160,27 +164,27 @@ function WireGuardSection({
   showAdvanced,
   onToggleAdvanced,
 }: WireGuardSectionProps) {
-  const [interfaces, setInterfaces] = useState<WireGuardInterface[]>([]);
+  const [detectionResult, setDetectionResult] = useState<TunnelDetectionResult | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isAvailable, setIsAvailable] = useState(true);
 
   useEffect(() => {
-    loadInterfaces();
+    detectTunnels();
   }, []);
 
-  const loadInterfaces = async () => {
+  const detectTunnels = async () => {
     setIsLoading(true);
     try {
       const available = await window.api.wireguard.isAvailable();
       setIsAvailable(available);
 
       if (available) {
-        const ifaces = await window.api.wireguard.getInterfaces();
-        setInterfaces(ifaces);
+        const result = await window.api.wireguard.detectTunnels();
+        setDetectionResult(result);
 
-        // Auto-select first interface and peer if auto-detect is enabled
-        if (settings.autoDetect && ifaces.length > 0 && !settings.interfaceName) {
-          const firstIface = ifaces[0];
+        // Auto-select first native interface if available and auto-detect is enabled
+        if (settings.autoDetect && result.nativeInterfaces.length > 0 && !settings.interfaceName) {
+          const firstIface = result.nativeInterfaces[0];
           if (firstIface.peers.length > 0) {
             onSettingsChange({
               interfaceName: firstIface.name,
@@ -188,14 +192,28 @@ function WireGuardSection({
             });
           }
         }
+
+        // If a third-party VPN is detected with a public key, auto-fill for manual mode
+        if (result.status === 'third_party_detected' && !settings.peerPublicKey) {
+          const connectedVPN = result.thirdPartyVPNs.find((v) => v.connected && v.publicKey);
+          if (connectedVPN) {
+            onSettingsChange({
+              interfaceName: connectedVPN.interfaceName || settings.interfaceName,
+              peerPublicKey: connectedVPN.publicKey || settings.peerPublicKey,
+              autoDetect: false, // Switch to manual mode for third-party VPNs
+            });
+          }
+        }
       }
     } catch (err) {
-      console.error('Failed to load WireGuard interfaces:', err);
+      console.error('Failed to detect tunnels:', err);
     } finally {
       setIsLoading(false);
     }
   };
 
+  const interfaces = detectionResult?.nativeInterfaces || [];
+  const thirdPartyVPNs = detectionResult?.thirdPartyVPNs || [];
   const selectedInterface = interfaces.find((i) => i.name === settings.interfaceName);
   const peers = selectedInterface?.peers || [];
 
@@ -228,6 +246,78 @@ function WireGuardSection({
     );
   }
 
+  // Render detection status card
+  const renderDetectionStatus = () => {
+    if (!detectionResult) return null;
+
+    const { status, summary, thirdPartyVPNs } = detectionResult;
+    const connectedVPNs = thirdPartyVPNs.filter((v) => v.connected);
+
+    if (status === 'native_available') {
+      return (
+        <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg mb-3">
+          <div className="flex items-center gap-2 text-green-500 text-sm font-medium">
+            <CheckCircle2 className="w-4 h-4" />
+            Native WireGuard Detected
+          </div>
+          <p className="text-xs text-muted-foreground mt-1">{summary}</p>
+        </div>
+      );
+    }
+
+    if (status === 'third_party_detected') {
+      return (
+        <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg mb-3 space-y-2">
+          <div className="flex items-center gap-2 text-amber-500 text-sm font-medium">
+            <Info className="w-4 h-4" />
+            Third-Party VPN Detected
+          </div>
+          {connectedVPNs.map((vpn) => (
+            <div key={vpn.provider} className="text-xs space-y-1">
+              <div className="flex items-center gap-2">
+                <Badge variant="outline" className="capitalize">
+                  {vpn.provider}
+                </Badge>
+                {vpn.server && (
+                  <span className="text-muted-foreground">{vpn.server}</span>
+                )}
+                {vpn.location && (
+                  <span className="text-muted-foreground">({vpn.location})</span>
+                )}
+              </div>
+              <p className="text-muted-foreground">{vpn.message}</p>
+              {vpn.publicKey && (
+                <div className="font-mono bg-muted/50 p-1.5 rounded text-[10px] break-all">
+                  Public Key: {vpn.publicKey}
+                </div>
+              )}
+            </div>
+          ))}
+          <div className="pt-2 border-t border-amber-500/20">
+            <p className="text-xs text-muted-foreground">
+              <strong>Note:</strong> Third-party VPNs use embedded WireGuard that cannot be controlled by this app.
+              Use manual configuration below, or set up a separate WireGuard tunnel via <code className="bg-muted px-1 rounded">wg-quick</code>.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    if (status === 'no_tunnel') {
+      return (
+        <div className="p-3 bg-muted/50 border border-muted rounded-lg mb-3">
+          <div className="flex items-center gap-2 text-muted-foreground text-sm font-medium">
+            <XCircle className="w-4 h-4" />
+            No Active Tunnel
+          </div>
+          <p className="text-xs text-muted-foreground mt-1">{summary}</p>
+        </div>
+      );
+    }
+
+    return null;
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
@@ -235,65 +325,77 @@ function WireGuardSection({
           <Shield className="w-4 h-4 text-muted-foreground" />
           <h3 className="text-sm font-medium">WireGuard</h3>
         </div>
-        <Button variant="ghost" size="sm" onClick={loadInterfaces} disabled={isLoading}>
-          {isLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Refresh'}
+        <Button variant="ghost" size="sm" onClick={detectTunnels} disabled={isLoading}>
+          {isLoading ? (
+            <Loader2 className="w-3 h-3 animate-spin" />
+          ) : (
+            <>
+              <RefreshCw className="w-3 h-3 mr-1" />
+              Detect
+            </>
+          )}
         </Button>
       </div>
 
-      <div className="space-y-3">
-        <div className="space-y-2">
-          <label className="text-xs text-muted-foreground">Interface</label>
-          <Select
-            value={settings.interfaceName}
-            onValueChange={handleInterfaceChange}
-            disabled={isLoading || !settings.autoDetect}
-          >
-            <SelectTrigger>
-              <SelectValue placeholder="Select interface..." />
-            </SelectTrigger>
-            <SelectContent>
-              {interfaces.map((iface) => (
-                <SelectItem key={iface.name} value={iface.name}>
-                  {iface.name} {iface.listenPort ? `(:${iface.listenPort})` : ''}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          {interfaces.length === 0 && !isLoading && (
-            <p className="text-xs text-amber-500">No active WireGuard interfaces found</p>
-          )}
-        </div>
+      {/* Detection Status */}
+      {renderDetectionStatus()}
 
-        <div className="space-y-2">
-          <label className="text-xs text-muted-foreground">Peer</label>
-          <Select
-            value={settings.peerPublicKey}
-            onValueChange={(v) => onSettingsChange({ peerPublicKey: v })}
-            disabled={isLoading || !settings.interfaceName || !settings.autoDetect}
-          >
-            <SelectTrigger>
-              <SelectValue placeholder="Select peer..." />
-            </SelectTrigger>
-            <SelectContent>
-              {peers.map((peer) => (
-                <SelectItem key={peer.publicKey} value={peer.publicKey}>
-                  <span className="font-mono text-xs">
-                    {peer.publicKey.substring(0, 16)}...
-                  </span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+      <div className="space-y-3">
+        {/* Only show interface dropdown if native interfaces are available */}
+        {interfaces.length > 0 && settings.autoDetect && (
+          <>
+            <div className="space-y-2">
+              <label className="text-xs text-muted-foreground">Interface</label>
+              <Select
+                value={settings.interfaceName}
+                onValueChange={handleInterfaceChange}
+                disabled={isLoading}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select interface..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {interfaces.map((iface) => (
+                    <SelectItem key={iface.name} value={iface.name}>
+                      {iface.name} {iface.listenPort ? `(:${iface.listenPort})` : ''}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs text-muted-foreground">Peer</label>
+              <Select
+                value={settings.peerPublicKey}
+                onValueChange={(v) => onSettingsChange({ peerPublicKey: v })}
+                disabled={isLoading || !settings.interfaceName}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select peer..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {peers.map((peer) => (
+                    <SelectItem key={peer.publicKey} value={peer.publicKey}>
+                      <span className="font-mono text-xs">
+                        {peer.publicKey.substring(0, 16)}...
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </>
+        )}
 
         <div className="flex items-center justify-between py-2">
           <label htmlFor="auto-detect" className="text-sm cursor-pointer">
-            Auto-detect configuration
+            Manual configuration
           </label>
           <Switch
             id="auto-detect"
-            checked={settings.autoDetect}
-            onCheckedChange={(checked) => onSettingsChange({ autoDetect: checked })}
+            checked={!settings.autoDetect}
+            onCheckedChange={(checked) => onSettingsChange({ autoDetect: !checked })}
           />
         </div>
 
@@ -304,8 +406,11 @@ function WireGuardSection({
               <Input
                 value={settings.interfaceName}
                 onChange={(e) => onSettingsChange({ interfaceName: e.target.value })}
-                placeholder="utun3"
+                placeholder="e.g., utun3, wg0, mullvad"
               />
+              <p className="text-[10px] text-muted-foreground">
+                Common names: wg0, utun3, mullvad
+              </p>
             </div>
             <div className="space-y-2">
               <label className="text-xs text-muted-foreground">Peer Public Key</label>
@@ -315,6 +420,21 @@ function WireGuardSection({
                 placeholder="Base64 public key..."
                 className="font-mono text-xs"
               />
+              {thirdPartyVPNs.some((v) => v.connected && v.publicKey) && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-xs h-6 px-2"
+                  onClick={() => {
+                    const vpn = thirdPartyVPNs.find((v) => v.connected && v.publicKey);
+                    if (vpn?.publicKey) {
+                      onSettingsChange({ peerPublicKey: vpn.publicKey });
+                    }
+                  }}
+                >
+                  Use detected key from {thirdPartyVPNs.find((v) => v.connected)?.provider}
+                </Button>
+              )}
             </div>
           </div>
         )}

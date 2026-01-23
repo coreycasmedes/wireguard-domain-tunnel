@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { WireGuardInterface, WireGuardSettings } from '../types';
+import { WireGuardInterface, WireGuardSettings, TunnelDetectionResult } from '../types';
 
 interface WireGuardConfigProps {
   settings: WireGuardSettings;
@@ -7,28 +7,28 @@ interface WireGuardConfigProps {
 }
 
 export function WireGuardConfig({ settings, onSettingsChange }: WireGuardConfigProps) {
-  const [interfaces, setInterfaces] = useState<WireGuardInterface[]>([]);
+  const [detectionResult, setDetectionResult] = useState<TunnelDetectionResult | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isAvailable, setIsAvailable] = useState(true);
   const [manualMode, setManualMode] = useState(!settings.autoDetect);
 
   useEffect(() => {
-    loadInterfaces();
+    detectTunnels();
   }, []);
 
-  const loadInterfaces = async () => {
+  const detectTunnels = async () => {
     setIsLoading(true);
     try {
       const available = await window.api.wireguard.isAvailable();
       setIsAvailable(available);
 
       if (available) {
-        const ifaces = await window.api.wireguard.getInterfaces();
-        setInterfaces(ifaces);
+        const result = await window.api.wireguard.detectTunnels();
+        setDetectionResult(result);
 
-        // Auto-select first interface and peer if auto-detect is enabled
-        if (settings.autoDetect && ifaces.length > 0 && !settings.interfaceName) {
-          const firstIface = ifaces[0];
+        // Auto-select first native interface if available and auto-detect is enabled
+        if (settings.autoDetect && result.nativeInterfaces.length > 0 && !settings.interfaceName) {
+          const firstIface = result.nativeInterfaces[0];
           if (firstIface.peers.length > 0) {
             onSettingsChange({
               interfaceName: firstIface.name,
@@ -36,14 +36,29 @@ export function WireGuardConfig({ settings, onSettingsChange }: WireGuardConfigP
             });
           }
         }
+
+        // If a third-party VPN is detected, switch to manual mode and auto-fill
+        if (result.status === 'third_party_detected' && !settings.peerPublicKey) {
+          const connectedVPN = result.thirdPartyVPNs.find((v) => v.connected && v.publicKey);
+          if (connectedVPN) {
+            setManualMode(true);
+            onSettingsChange({
+              interfaceName: connectedVPN.interfaceName || settings.interfaceName,
+              peerPublicKey: connectedVPN.publicKey || settings.peerPublicKey,
+              autoDetect: false,
+            });
+          }
+        }
       }
     } catch (err) {
-      console.error('Failed to load WireGuard interfaces:', err);
+      console.error('Failed to detect tunnels:', err);
     } finally {
       setIsLoading(false);
     }
   };
 
+  const interfaces = detectionResult?.nativeInterfaces || [];
+  const thirdPartyVPNs = detectionResult?.thirdPartyVPNs || [];
   const selectedInterface = interfaces.find((i) => i.name === settings.interfaceName);
   const peers = selectedInterface?.peers || [];
 
@@ -76,58 +91,139 @@ export function WireGuardConfig({ settings, onSettingsChange }: WireGuardConfigP
     );
   }
 
+  // Render detection status
+  const renderDetectionStatus = () => {
+    if (!detectionResult) return null;
+
+    const { status, summary, thirdPartyVPNs } = detectionResult;
+    const connectedVPNs = thirdPartyVPNs.filter((v) => v.connected);
+
+    if (status === 'native_available') {
+      return (
+        <div className="px-4 py-3 bg-green-900/30 border border-green-700 rounded-lg mb-4">
+          <div className="flex items-center gap-2 text-green-400">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+            <span className="font-medium">Native WireGuard Detected</span>
+          </div>
+          <p className="mt-1 text-xs text-gray-400">{summary}</p>
+        </div>
+      );
+    }
+
+    if (status === 'third_party_detected') {
+      return (
+        <div className="px-4 py-3 bg-amber-900/30 border border-amber-700 rounded-lg mb-4 space-y-2">
+          <div className="flex items-center gap-2 text-amber-400">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span className="font-medium">Third-Party VPN Detected</span>
+          </div>
+          {connectedVPNs.map((vpn) => (
+            <div key={vpn.provider} className="text-xs space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 bg-gray-700 rounded capitalize">{vpn.provider}</span>
+                {vpn.server && <span className="text-gray-400">{vpn.server}</span>}
+                {vpn.location && <span className="text-gray-400">({vpn.location})</span>}
+              </div>
+              <p className="text-gray-400">{vpn.message}</p>
+              {vpn.publicKey && (
+                <div className="font-mono bg-gray-800 p-1.5 rounded text-[10px] break-all text-gray-300">
+                  Public Key: {vpn.publicKey}
+                </div>
+              )}
+            </div>
+          ))}
+          <p className="text-xs text-gray-400 pt-2 border-t border-gray-700">
+            <strong>Note:</strong> Third-party VPNs use embedded WireGuard. Use manual configuration below.
+          </p>
+        </div>
+      );
+    }
+
+    if (status === 'no_tunnel') {
+      return (
+        <div className="px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg mb-4">
+          <div className="flex items-center gap-2 text-gray-400">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span className="font-medium">No Active Tunnel</span>
+          </div>
+          <p className="mt-1 text-xs text-gray-500">{summary}</p>
+        </div>
+      );
+    }
+
+    return null;
+  };
+
   return (
     <div className="p-4 space-y-4">
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-medium text-white">WireGuard Configuration</h3>
         <button
-          onClick={loadInterfaces}
+          onClick={detectTunnels}
           disabled={isLoading}
-          className="text-sm text-blue-400 hover:text-blue-300 disabled:text-gray-500"
+          className="text-sm text-blue-400 hover:text-blue-300 disabled:text-gray-500 flex items-center gap-1"
         >
-          {isLoading ? 'Loading...' : 'Refresh'}
+          {isLoading ? (
+            'Detecting...'
+          ) : (
+            <>
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              Detect
+            </>
+          )}
         </button>
       </div>
 
-      <div className="space-y-3">
-        <div>
-          <label className="block text-sm text-gray-400 mb-1">Interface</label>
-          <select
-            value={settings.interfaceName}
-            onChange={(e) => handleInterfaceChange(e.target.value)}
-            disabled={isLoading || manualMode}
-            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500 disabled:text-gray-500"
-          >
-            <option value="">Select interface...</option>
-            {interfaces.map((iface) => (
-              <option key={iface.name} value={iface.name}>
-                {iface.name} {iface.listenPort ? `(:${iface.listenPort})` : ''}
-              </option>
-            ))}
-          </select>
-          {interfaces.length === 0 && !isLoading && (
-            <p className="mt-1 text-xs text-amber-400">
-              No active WireGuard interfaces found
-            </p>
-          )}
-        </div>
+      {/* Detection Status */}
+      {renderDetectionStatus()}
 
-        <div>
-          <label className="block text-sm text-gray-400 mb-1">Peer</label>
-          <select
-            value={settings.peerPublicKey}
-            onChange={(e) => onSettingsChange({ peerPublicKey: e.target.value })}
-            disabled={isLoading || !settings.interfaceName || manualMode}
-            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500 disabled:text-gray-500"
-          >
-            <option value="">Select peer...</option>
-            {peers.map((peer) => (
-              <option key={peer.publicKey} value={peer.publicKey}>
-                {peer.publicKey.substring(0, 20)}... {peer.endpoint ? `(${peer.endpoint})` : ''}
-              </option>
-            ))}
-          </select>
-        </div>
+      <div className="space-y-3">
+        {/* Only show dropdowns if native interfaces are available */}
+        {interfaces.length > 0 && !manualMode && (
+          <>
+            <div>
+              <label className="block text-sm text-gray-400 mb-1">Interface</label>
+              <select
+                value={settings.interfaceName}
+                onChange={(e) => handleInterfaceChange(e.target.value)}
+                disabled={isLoading}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500 disabled:text-gray-500"
+              >
+                <option value="">Select interface...</option>
+                {interfaces.map((iface) => (
+                  <option key={iface.name} value={iface.name}>
+                    {iface.name} {iface.listenPort ? `(:${iface.listenPort})` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm text-gray-400 mb-1">Peer</label>
+              <select
+                value={settings.peerPublicKey}
+                onChange={(e) => onSettingsChange({ peerPublicKey: e.target.value })}
+                disabled={isLoading || !settings.interfaceName}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500 disabled:text-gray-500"
+              >
+                <option value="">Select peer...</option>
+                {peers.map((peer) => (
+                  <option key={peer.publicKey} value={peer.publicKey}>
+                    {peer.publicKey.substring(0, 20)}... {peer.endpoint ? `(${peer.endpoint})` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </>
+        )}
 
         <div className="pt-2 border-t border-gray-800">
           <label className="flex items-center gap-2 cursor-pointer">
@@ -152,9 +248,10 @@ export function WireGuardConfig({ settings, onSettingsChange }: WireGuardConfigP
                 type="text"
                 value={settings.interfaceName}
                 onChange={(e) => onSettingsChange({ interfaceName: e.target.value })}
-                placeholder="utun3"
+                placeholder="e.g., utun3, wg0, mullvad"
                 className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
               />
+              <p className="mt-1 text-xs text-gray-500">Common names: wg0, utun3, mullvad</p>
             </div>
             <div>
               <label className="block text-sm text-gray-400 mb-1">Peer Public Key</label>
@@ -165,6 +262,19 @@ export function WireGuardConfig({ settings, onSettingsChange }: WireGuardConfigP
                 placeholder="Base64 public key..."
                 className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono text-sm"
               />
+              {thirdPartyVPNs.some((v) => v.connected && v.publicKey) && (
+                <button
+                  onClick={() => {
+                    const vpn = thirdPartyVPNs.find((v) => v.connected && v.publicKey);
+                    if (vpn?.publicKey) {
+                      onSettingsChange({ peerPublicKey: vpn.publicKey });
+                    }
+                  }}
+                  className="mt-1 text-xs text-blue-400 hover:text-blue-300"
+                >
+                  Use detected key from {thirdPartyVPNs.find((v) => v.connected)?.provider}
+                </button>
+              )}
             </div>
           </div>
         )}

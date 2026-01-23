@@ -32,6 +32,26 @@ export interface WireGuardSettings {
   autoDetect: boolean;
 }
 
+export interface DetectedVPN {
+  provider: 'mullvad' | 'pia' | 'protonvpn' | 'unknown';
+  connected: boolean;
+  protocol: 'wireguard' | 'openvpn' | 'unknown';
+  server?: string;
+  location?: string;
+  publicKey?: string;
+  interfaceName?: string;
+  controllable: boolean;
+  message: string;
+}
+
+export interface TunnelDetectionResult {
+  nativeInterfaces: WireGuardInterface[];
+  thirdPartyVPNs: DetectedVPN[];
+  utunInterfaces: string[];
+  status: 'native_available' | 'third_party_detected' | 'no_tunnel' | 'unknown';
+  summary: string;
+}
+
 export interface DnsSettings {
   tunnelUpstream: { host: string; port: number };
   directUpstream: { host: string; port: number };
@@ -83,6 +103,7 @@ const api = {
     isAvailable: (): Promise<boolean> => ipcRenderer.invoke('wireguard:is-available'),
     isActive: (): Promise<boolean> => ipcRenderer.invoke('wireguard:is-active'),
     getAllowedIps: (): Promise<string[]> => ipcRenderer.invoke('wireguard:get-allowed-ips'),
+    detectTunnels: (): Promise<TunnelDetectionResult> => ipcRenderer.invoke('wireguard:detect-tunnels'),
   },
 
   // DNS Settings

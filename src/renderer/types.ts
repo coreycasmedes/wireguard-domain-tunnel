@@ -56,3 +56,23 @@ export interface AppStatus {
   totalInjectedRoutes: number;
   activeConflicts: number;
 }
+
+export interface DetectedVPN {
+  provider: 'mullvad' | 'pia' | 'protonvpn' | 'unknown';
+  connected: boolean;
+  protocol: 'wireguard' | 'openvpn' | 'unknown';
+  server?: string;
+  location?: string;
+  publicKey?: string;
+  interfaceName?: string;
+  controllable: boolean;
+  message: string;
+}
+
+export interface TunnelDetectionResult {
+  nativeInterfaces: WireGuardInterface[];
+  thirdPartyVPNs: DetectedVPN[];
+  utunInterfaces: string[];
+  status: 'native_available' | 'third_party_detected' | 'no_tunnel' | 'unknown';
+  summary: string;
+}
